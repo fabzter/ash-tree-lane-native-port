@@ -331,9 +331,9 @@ namespace AshTreeLane
 
                     input.PollConnectedControllers();
 
-                    if (logGamepad && (frame == 1 || frame % 15 == 0))
+                    if (logGamepad && (frame == 1 || frame % 10 == 0))
                     {
-                        Console.WriteLine($"[PadLog f={frame}] pads={input.ConnectedGamepadCount} ({input.ActiveGamepadName}) H={Input.GetAxis("Horizontal"):F3} V={Input.GetAxis("Vertical"):F3} MX={Input.GetAxisRaw("Mouse X"):F3} MY={Input.GetAxisRaw("Mouse Y"):F3} {input.GetRawAxisDebugString()}");
+                        Console.WriteLine($"[PadLog f={frame}] pads={input.ConnectedGamepadCount} ({input.ActiveGamepadName}) H={Input.GetAxis("Horizontal"):F3} V={Input.GetAxis("Vertical"):F3} MX={Input.GetAxisRaw("Mouse X"):F3} MY={Input.GetAxisRaw("Mouse Y"):F3} {input.GetRawAxisDebugString()} {input.GetPhysicalAxisDebugString()} pos={(Camera.main != null && Camera.main.transform.parent != null ? Camera.main.transform.parent.position.ToString() : "n/a")}");
                     }
 
                     // Route scheduled synthetic keys cleanly to Pause Menu or gameplay Input
@@ -417,12 +417,12 @@ namespace AshTreeLane
                 }
             }
 
+            if (traceRender) Console.WriteLine("[Shutdown] audio.Dispose()");
+            audio.Dispose();
             if (traceRender) Console.WriteLine("[Shutdown] input.Dispose()");
             input.Dispose();
             if (traceRender) Console.WriteLine("[Shutdown] renderer.Dispose()");
             renderer.Dispose();
-            if (traceRender) Console.WriteLine("[Shutdown] audio.Dispose()");
-            audio.Dispose();
             if (traceRender) Console.WriteLine("[Shutdown] SDL_DestroyWindow");
             if (renderer.Window != null) SDL3.SDL_DestroyWindow(renderer.Window);
             if (traceRender) Console.WriteLine("[Shutdown] SDL_Quit");

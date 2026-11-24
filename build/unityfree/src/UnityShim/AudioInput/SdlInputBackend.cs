@@ -53,12 +53,55 @@ namespace UnityShim.AudioInput
         public bool AnyKey => _held.Count > 0 || _down.Count > 0 || (_controllerEnabled && !MenuPaused && _gpMappedHeld.Count > 0);
         public bool AnyKeyDown => _down.Count > 0;
 
+        // Raw HID fallback for Switch-protocol (057e:2009) pads that macOS GameController (MFi) exposes
+        // with a dead left stick (e.g. "DUALSHOCK 4" clones). Standard 0x30 report: LS = bytes 6-8, RS = bytes 9-11 (12-bit packed).
+        private SDL_hid_device* _hid;
+        private float _hidLx, _hidLy, _hidRx, _hidRy;
+        private bool _hidTried;
+
+        private void TryOpenHid()
+        {
+            if (_hid != null || ConnectedGamepadCount == 0) return;
+            SDL3.SDL_hid_init();
+            SDL_hid_device_info* devs = SDL3.SDL_hid_enumerate(0x057e, 0x2009);
+            for (SDL_hid_device_info* d = devs; d != null; d = d->next)
+            {
+                SDL_hid_device* h = SDL3.SDL_hid_open_path(d->path);
+                if (h != null)
+                {
+                    _hid = h;
+                    Console.WriteLine("[Input] Raw HID stick fallback opened (057e:2009 Switch-protocol report 0x30)");
+                    break;
+                }
+            }
+            if (devs != null) SDL3.SDL_hid_free_enumeration(devs);
+        }
+
+        private void PumpHid()
+        {
+            if (_hid == null) return;
+            byte* buf = stackalloc byte[128];
+            for (int guard = 0; guard < 64; guard++)
+            {
+                int n = SDL3.SDL_hid_read_timeout(_hid, buf, 128, 0);
+                if (n < 0) { SDL3.SDL_hid_close(_hid); _hid = null; _hidLx = _hidLy = _hidRx = _hidRy = 0f; return; }
+                if (n < 12) break;
+                if (buf[0] != 0x30) continue;
+                static float Norm(int v, int center) => Math.Clamp((v - center) / 1800f, -1f, 1f);
+                int lx = buf[6] | ((buf[7] & 0x0F) << 8), ly = (buf[7] >> 4) | (buf[8] << 4);
+                int rx = buf[9] | ((buf[10] & 0x0F) << 8), ry = (buf[10] >> 4) | (buf[11] << 4);
+                _hidLx = Norm(lx, 2048); _hidLy = -Norm(ly, 2032);   // HID Y up is positive; SDL Y down is positive
+                _hidRx = Norm(rx, 2048); _hidRy = -Norm(ry, 2032);
+            }
+        }
+
         public void InitializeGamepads() => RescanControllers();
 
         public void RescanControllers()
         {
             SDL3.SDL_UpdateJoysticks();
             SDL3.SDL_UpdateGamepads();
+            TryOpenHid();
 
             int gcount = 0;
             SDL_JoystickID* gids = SDL3.SDL_GetGamepads(&gcount);
@@ -209,7 +252,11 @@ namespace UnityShim.AudioInput
 
         public void PollConnectedControllers()
         {
-            if (ConnectedGamepadCount == 0) return;
+            if (ConnectedGamepadCount == 0)
+            {
+                if (_hid != null) { SDL3.SDL_hid_close(_hid); _hid = null; _hidLx = _hidLy = _hidRx = _hidRy = 0f; }
+                return;
+            }
 
             float lx = 0f, ly = 0f, rx = 0f, ry = 0f;
             static float PickMaxAbs(float cur, float cand) => MathF.Abs(cand) > MathF.Abs(cur) ? cand : cur;
@@ -240,10 +287,43 @@ namespace UnityShim.AudioInput
                 }
             }
 
+            PumpHid();
+            lx = PickMaxAbs(lx, _hidLx); ly = PickMaxAbs(ly, _hidLy);
+            rx = PickMaxAbs(rx, _hidRx); ry = PickMaxAbs(ry, _hidRy);
+
             _gpLeftX = lx;
             _gpLeftY = ly;
             _gpRightX = rx;
             _gpRightY = ry;
+        }
+
+        public string GetPhysicalAxisDebugString()
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in _gamepads)
+            {
+                SDL_Gamepad* gp = (SDL_Gamepad*)kv.Value;
+                if (gp == null) continue;
+                sb.Append($"GP{kv.Key}[");
+                for (int a = 0; a < 6; a++) sb.Append(SDL3.SDL_GetGamepadAxis(gp, (SDL_GamepadAxis)a)).Append(a < 5 ? "," : "");
+                SDL_Joystick* j = SDL3.SDL_GetGamepadJoystick(gp);
+                if (j != null)
+                {
+                    int n = SDL3.SDL_GetNumJoystickAxes(j);
+                    sb.Append("] raw[");
+                    for (int a = 0; a < n; a++) sb.Append(SDL3.SDL_GetJoystickAxis(j, a)).Append(a < n - 1 ? "," : "");
+                }
+                sb.Append("] ");
+            }
+            foreach (var kv in _rawJoysticks)
+            {
+                SDL_Joystick* j = (SDL_Joystick*)kv.Value;
+                int n = SDL3.SDL_GetNumJoystickAxes(j);
+                sb.Append($"RAW{kv.Key}[");
+                for (int a = 0; a < n; a++) sb.Append(SDL3.SDL_GetJoystickAxis(j, a)).Append(a < n - 1 ? "," : "");
+                sb.Append("] ");
+            }
+            return sb.ToString();
         }
 
         public string GetRawAxisDebugString() => $"L=({_gpLeftX:F2},{_gpLeftY:F2}) R=({_gpRightX:F2},{_gpRightY:F2})";
@@ -668,6 +748,7 @@ namespace UnityShim.AudioInput
 
         public void Dispose()
         {
+            if (_hid != null) { SDL3.SDL_hid_close(_hid); _hid = null; }
             foreach (nint ptr in _gamepads.Values)
             {
                 if (ptr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)ptr);

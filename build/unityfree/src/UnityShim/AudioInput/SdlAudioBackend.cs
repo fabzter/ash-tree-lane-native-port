@@ -22,7 +22,7 @@ namespace UnityShim.AudioInput
 
         private readonly Dictionary<int, float[]> _clips = new();
         private readonly Dictionary<int, Voice> _voices = new();
-        private readonly SDL_AudioStream* _stream;
+        private SDL_AudioStream* _stream;
         private int _nextClipId = 1;
         private int _nextVoiceId = 1;
         private float _lx, _ly, _lz, _lrx = 1f, _lry, _lrz;
@@ -168,7 +168,14 @@ namespace UnityShim.AudioInput
         {
             if (_disposed) return;
             _disposed = true;
-            if (_stream != null) SDL3.SDL_DestroyAudioStream(_stream);
+            // Only tear down while the audio subsystem is still alive; destroying a stream after
+            // SDL_Quit / device loss dereferences freed device state (SIGSEGV in pthread_mutex_lock).
+            if (_stream != null && SDL3.SDL_WasInit(SDL_InitFlags.SDL_INIT_AUDIO) != 0)
+            {
+                SDL3.SDL_PauseAudioStreamDevice(_stream);
+                SDL3.SDL_DestroyAudioStream(_stream);
+            }
+            _stream = null;
         }
     }
 }

@@ -10,6 +10,11 @@ dotnet publish src/AshTreeLane/AshTreeLane.csproj -c Release -r osx-arm64 --self
 echo "== bundle .app =="
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -R "$PUB/." "$APP/Contents/MacOS/"
+rm -f "$APP/Contents/MacOS/libSDL3.dylib" "$APP/Contents/MacOS/"*.pdb
+if [ -f /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib ]; then
+  cp -fL /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib "$APP/Contents/MacOS/libSDL3.0.dylib"
+  chmod u+w "$APP/Contents/MacOS/libSDL3.0.dylib"
+fi
 cp -R assets "$APP/Contents/Resources/assets"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
