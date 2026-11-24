@@ -71,3 +71,12 @@ Written for future agents and humans. Game © GingerEnslaver; technique credit: 
 ## 9. Ethics
 - Honor the original author (GingerEnslaver) and the technique's author (Andreansx). Do not
   redistribute the game's assets/binaries/verbatim source; publish only tooling + notes + credit.
+
+## 10. "It runs" ≠ "it matches" — audit fidelity gaps (2026-11-24)
+- The Unity-free SDL3 build booted and rendered, but the trees looked flat vs the original's stylish
+  painterly look. Functionally correct is NOT visually faithful.
+- Before declaring any port/RE done, run a **gap audit** against the original, category by category:
+  default post-fx, lighting/lightmaps, texture encoding/color-space/palette textures, shaders, static
+  batching, UI scaling/fonts, audio, input/physics feel, scene flow, platform/launch. Capture both at
+  the same state and compare side-by-side; fix shim/shaders/asset-encoding (keep game code verbatim).
+- Codified as the skill `port-fidelity-gap-audit` (fabzter/agent-skills).
