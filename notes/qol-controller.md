@@ -29,3 +29,17 @@ All in the shim/host; `decomp/csharp` stays verbatim. Verified via `--test-gamep
 ## Verify
 - `bash build/unityfree/build_app.sh`; run with `--test-gamepad` (virtual pad asserts axes/buttons/
   pause/raw-fallback) and physical pad; screenshots `verify/qol_*.png`.
+
+## Pitfalls found in real-device testing (2026-11-24)
+- **Double-click launch SIGSEGV**: `SDL_DestroyAudioStream` on a freed device (audio teardown) crashed
+  only under LaunchServices (Finder double-click), not terminal runs. Fix: guard `Dispose` with
+  `SDL_WasInit(SDL_INIT_AUDIO)`, pause stream before destroy, null pointer, dispose audio BEFORE
+  input/renderer/`SDL_Quit`. Always test Finder double-click + normal quit, not just CLI.
+- **Left stick dead on real PS4 while `--test-gamepad` passed**: BT PS4 goes through Apple MFi and needs
+  the app FOREGROUND for HID reports; gamepad-axis events unreliable. Fix: poll `SDL_GetGamepadAxis`
+  each frame + raw `SDL_GetJoystickAxis` fallback. Verify with the PHYSICAL pad (left stick moves the
+  player), never trust the virtual test alone.
+- **HIDAPI Switch driver hijacks PS4** ("couldn't load stick calibration"/"no mapping"): set
+  `SDL_JOYSTICK_HIDAPI_SWITCH=0`, `HIDAPI_PS4=1`.
+- **Stale bundled libSDL3** from NuGet/publish lacks HIDAPI PS4; build_app.sh copies the current
+  homebrew libSDL3.0.dylib into the .app.

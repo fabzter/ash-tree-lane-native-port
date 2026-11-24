@@ -89,3 +89,14 @@ Written for future agents and humans. Game © GingerEnslaver; technique credit: 
   on Mac. SIGSEGV after load = Blit/teardown; lldb --batch hangs on CoreCLR → isolate without debugger.
 - Visual fidelity required full-res lightmaps + flat normals + palette point-filtering + default
   post-fx + PBS specular (see §10 and `port-fidelity-gap-audit`).
+
+## 12. Real-device testing catches what virtual tests miss (2026-11-24)
+- **Double-click ≠ terminal run**: the audio-teardown SIGSEGV only appeared under LaunchServices
+  (Finder double-click). Guard audio Dispose (SDL_WasInit), pause-before-destroy, dispose before
+  SDL_Quit. Test the actual launch path users use.
+- **Virtual gamepad ≠ physical pad**: `--test-gamepad` passed but the real PS4 left stick was dead
+  (Apple MFi needs foreground; axis events unreliable). Poll axes + raw-joystick fallback; verify with
+  the physical device.
+- **Delegation**: when Neon (Gemini) hit quota, switched agy to Claude Sonnet via `/model` and it
+  finished the fixes. Keep a quota-available model in reserve.
+- Details: `notes/qol-controller.md`; skill `unity-free-sdl3-rebuild`.
