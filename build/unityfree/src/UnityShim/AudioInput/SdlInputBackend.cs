@@ -16,14 +16,19 @@ namespace UnityShim.AudioInput
         private readonly HashSet<int> _synthHeld = new();
 
         private readonly Dictionary<uint, nint> _gamepads = new();
+        private readonly Dictionary<uint, nint> _rawJoysticks = new();
+        private readonly HashSet<uint> _failedOpenIds = new();
         private readonly HashSet<SDL_GamepadButton> _gpButtonsHeld = new();
         private readonly HashSet<SDL_GamepadButton> _gpButtonsDown = new();
+        private readonly List<SDL_GamepadButton> _menuGpButtonsDown = new();
 
         private float _mouseDx, _mouseDy;
         private float _gpLeftX, _gpLeftY, _gpRightX, _gpRightY;
         private float _horizSmoothed, _vertSmoothed;
         private float _lastDt = 1f / 60f;
         private bool _controllerEnabled = true;
+        private bool _pauseToggleRequested;
+        private byte _rawHatPrev;
 
         public float GamepadDeadzone { get; set; } = 0.18f;
         public float GamepadLookSpeed { get; set; } = 65f;
@@ -42,28 +47,56 @@ namespace UnityShim.AudioInput
             }
         }
 
-        public int ConnectedGamepadCount => _gamepads.Count;
+        public int ConnectedGamepadCount => _gamepads.Count + _rawJoysticks.Count;
         public string ActiveGamepadName { get; private set; } = "None";
 
         public bool AnyKey => _held.Count > 0 || _down.Count > 0 || (_controllerEnabled && !MenuPaused && _gpMappedHeld.Count > 0);
         public bool AnyKeyDown => _down.Count > 0;
 
-        public void InitializeGamepads()
+        public void InitializeGamepads() => RescanControllers();
+
+        public void RescanControllers()
         {
-            int count = 0;
-            SDL_JoystickID* ids = SDL3.SDL_GetGamepads(&count);
-            if (ids != null)
+            SDL3.SDL_UpdateJoysticks();
+            SDL3.SDL_UpdateGamepads();
+
+            int gcount = 0;
+            SDL_JoystickID* gids = SDL3.SDL_GetGamepads(&gcount);
+            if (gids != null)
             {
                 try
                 {
-                    for (int i = 0; i < count; i++) OpenGamepad(ids[i]);
+                    for (int i = 0; i < gcount; i++) OpenGamepadOrFallback(gids[i]);
                 }
                 finally
                 {
-                    SDL3.SDL_free((nint)ids);
+                    SDL3.SDL_free((nint)gids);
+                }
+            }
+
+            int jcount = 0;
+            SDL_JoystickID* jids = SDL3.SDL_GetJoysticks(&jcount);
+            if (jids != null)
+            {
+                try
+                {
+                    for (int i = 0; i < jcount; i++) OpenGamepadOrFallback(jids[i]);
+                }
+                finally
+                {
+                    SDL3.SDL_free((nint)jids);
                 }
             }
         }
+
+        public bool ConsumePauseToggleRequest()
+        {
+            bool v = _pauseToggleRequested;
+            _pauseToggleRequested = false;
+            return v;
+        }
+
+        public IReadOnlyList<SDL_GamepadButton> DrainMenuGamepadButtons() => _menuGpButtonsDown;
 
         private void ClearGamepadMappedState()
         {
@@ -78,29 +111,80 @@ namespace UnityShim.AudioInput
             _gpRightY = 0f;
         }
 
-        private void OpenGamepad(SDL_JoystickID id)
+        private void OpenGamepadOrFallback(SDL_JoystickID id)
         {
             uint key = (uint)id;
-            if (_gamepads.ContainsKey(key)) return;
-            SDL_Gamepad* gp = SDL3.SDL_OpenGamepad(id);
-            if (gp == null) return;
-            _gamepads[key] = (nint)gp;
-            byte* pName = SDL3.Unsafe_SDL_GetGamepadName(gp);
-            string name = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Gamepad") : "Gamepad";
-            ActiveGamepadName = name;
-            Console.WriteLine($"[Input] Gamepad connected ({id}): {name}");
+            if (_gamepads.ContainsKey(key) || _rawJoysticks.ContainsKey(key)) return;
+
+            if (SDL3.SDL_IsGamepad(id))
+            {
+                SDL_Gamepad* gp = SDL3.SDL_OpenGamepad(id);
+                if (gp != null)
+                {
+                    _gamepads[key] = (nint)gp;
+                    _failedOpenIds.Remove(key);
+                    byte* pName = SDL3.Unsafe_SDL_GetGamepadName(gp);
+                    string name = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Gamepad") : "Gamepad";
+                    ActiveGamepadName = name;
+                    Console.WriteLine($"[Input] Gamepad connected ({id}): {name}");
+                    return;
+                }
+                if (!_failedOpenIds.Contains(key))
+                {
+                    Console.Error.WriteLine($"[Input] SDL_OpenGamepad({id}) failed ({SdlNative.GetErrorString()}), trying raw joystick fallback...");
+                }
+            }
+
+            OpenRawJoystick(id);
         }
 
-        private void CloseGamepad(SDL_JoystickID id)
+        private void OpenRawJoystick(SDL_JoystickID id)
         {
             uint key = (uint)id;
-            if (_gamepads.Remove(key, out nint ptr))
+            if (_rawJoysticks.ContainsKey(key) || _gamepads.ContainsKey(key)) return;
+            SDL_Joystick* joy = SDL3.SDL_OpenJoystick(id);
+            if (joy != null)
             {
-                if (ptr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)ptr);
+                _rawJoysticks[key] = (nint)joy;
+                _failedOpenIds.Remove(key);
+                byte* pName = SDL3.Unsafe_SDL_GetJoystickName(joy);
+                string name = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Raw Joystick") : "Raw Joystick";
+                int na = SDL3.SDL_GetNumJoystickAxes(joy);
+                int nb = SDL3.SDL_GetNumJoystickButtons(joy);
+                int nh = SDL3.SDL_GetNumJoystickHats(joy);
+                if (ActiveGamepadName == "None") ActiveGamepadName = name;
+                else if (_gamepads.Count == 0) ActiveGamepadName = name;
+                Console.WriteLine($"[Input] Raw joystick connected ({id}): {name} (axes={na}, btns={nb}, hats={nh})");
+            }
+            else if (_failedOpenIds.Add(key))
+            {
+                Console.Error.WriteLine($"[Input] SDL_OpenJoystick({id}) failed: {SdlNative.GetErrorString()}");
+            }
+        }
+
+        private void CloseController(SDL_JoystickID id)
+        {
+            uint key = (uint)id;
+            _failedOpenIds.Remove(key);
+            bool removed = false;
+            if (_gamepads.Remove(key, out nint gpPtr))
+            {
+                if (gpPtr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)gpPtr);
+                Console.WriteLine($"[Input] Gamepad disconnected ({id})");
+                removed = true;
+            }
+            if (_rawJoysticks.Remove(key, out nint jPtr))
+            {
+                if (jPtr != 0) SDL3.SDL_CloseJoystick((SDL_Joystick*)jPtr);
+                _rawHatPrev = 0;
+                Console.WriteLine($"[Input] Raw joystick disconnected ({id})");
+                removed = true;
+            }
+            if (removed)
+            {
                 ClearGamepadMappedState();
                 _gpButtonsHeld.Clear();
                 RefreshActiveGamepadName();
-                Console.WriteLine($"[Input] Gamepad disconnected ({id})");
             }
         }
 
@@ -112,15 +196,65 @@ namespace UnityShim.AudioInput
                 if (ptr == 0) continue;
                 byte* pName = SDL3.Unsafe_SDL_GetGamepadName((SDL_Gamepad*)ptr);
                 ActiveGamepadName = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Gamepad") : "Gamepad";
-                break;
+                return;
+            }
+            foreach (nint ptr in _rawJoysticks.Values)
+            {
+                if (ptr == 0) continue;
+                byte* pName = SDL3.Unsafe_SDL_GetJoystickName((SDL_Joystick*)ptr);
+                ActiveGamepadName = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Raw Joystick") : "Raw Joystick";
+                return;
             }
         }
+
+        public void PollConnectedControllers()
+        {
+            if (ConnectedGamepadCount == 0) return;
+
+            float lx = 0f, ly = 0f, rx = 0f, ry = 0f;
+            static float PickMaxAbs(float cur, float cand) => MathF.Abs(cand) > MathF.Abs(cur) ? cand : cur;
+
+            foreach (nint ptr in _gamepads.Values)
+            {
+                if (ptr == 0) continue;
+                SDL_Gamepad* gp = (SDL_Gamepad*)ptr;
+                lx = PickMaxAbs(lx, Math.Clamp(SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX) / 32767f, -1f, 1f));
+                ly = PickMaxAbs(ly, Math.Clamp(SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTY) / 32767f, -1f, 1f));
+                rx = PickMaxAbs(rx, Math.Clamp(SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX) / 32767f, -1f, 1f));
+                ry = PickMaxAbs(ry, Math.Clamp(SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY) / 32767f, -1f, 1f));
+            }
+            foreach (nint ptr in _rawJoysticks.Values)
+            {
+                if (ptr == 0) continue;
+                SDL_Joystick* joy = (SDL_Joystick*)ptr;
+                int naxes = SDL3.SDL_GetNumJoystickAxes(joy);
+                if (naxes >= 2)
+                {
+                    lx = PickMaxAbs(lx, Math.Clamp(SDL3.SDL_GetJoystickAxis(joy, 0) / 32767f, -1f, 1f));
+                    ly = PickMaxAbs(ly, Math.Clamp(SDL3.SDL_GetJoystickAxis(joy, 1) / 32767f, -1f, 1f));
+                }
+                if (naxes >= 4)
+                {
+                    rx = PickMaxAbs(rx, Math.Clamp(SDL3.SDL_GetJoystickAxis(joy, 2) / 32767f, -1f, 1f));
+                    ry = PickMaxAbs(ry, Math.Clamp(SDL3.SDL_GetJoystickAxis(joy, 3) / 32767f, -1f, 1f));
+                }
+            }
+
+            _gpLeftX = lx;
+            _gpLeftY = ly;
+            _gpRightX = rx;
+            _gpRightY = ry;
+        }
+
+        public string GetRawAxisDebugString() => $"L=({_gpLeftX:F2},{_gpLeftY:F2}) R=({_gpRightX:F2},{_gpRightY:F2})";
 
         public void BeginFrame()
         {
             _down.Clear();
             _up.Clear();
             _gpButtonsDown.Clear();
+            _menuGpButtonsDown.Clear();
+            _pauseToggleRequested = false;
             _mouseDx = 0f;
             _mouseDy = 0f;
         }
@@ -134,6 +268,8 @@ namespace UnityShim.AudioInput
             _synthHeld.Clear();
             _gpButtonsHeld.Clear();
             _gpButtonsDown.Clear();
+            _menuGpButtonsDown.Clear();
+            _rawHatPrev = 0;
             _mouseDx = 0f;
             _mouseDy = 0f;
             _horizSmoothed = 0f;
@@ -149,17 +285,69 @@ namespace UnityShim.AudioInput
             return (lx, -ly); // +Y = Up / Forward
         }
 
+        private void ProcessGamepadButton(SDL_GamepadButton btn, bool isDown)
+        {
+            if (btn == SDL_GamepadButton.SDL_GAMEPAD_BUTTON_INVALID) return;
+            if (isDown)
+            {
+                if (_gpButtonsHeld.Add(btn))
+                {
+                    _gpButtonsDown.Add(btn);
+                    if (_controllerEnabled)
+                    {
+                        if (btn == SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START)
+                        {
+                            _pauseToggleRequested = true;
+                        }
+                        else if (MenuPaused)
+                        {
+                            _menuGpButtonsDown.Add(btn);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                _gpButtonsHeld.Remove(btn);
+            }
+
+            if (!_controllerEnabled || MenuPaused) return;
+
+            int mappedKc = MapGamepadButtonToKeyCode(btn);
+            if (mappedKc != 0)
+            {
+                if (isDown)
+                {
+                    if (_gpMappedHeld.Add(mappedKc) && !_held.Contains(mappedKc)) _down.Add(mappedKc);
+                }
+                else
+                {
+                    if (_gpMappedHeld.Remove(mappedKc) && !_held.Contains(mappedKc)) _up.Add(mappedKc);
+                }
+            }
+        }
+
         public void HandleEvent(in SDL_Event e)
         {
             var type = e.Type;
             if (type == SDL_EventType.SDL_EVENT_GAMEPAD_ADDED)
             {
-                OpenGamepad(e.gdevice.which);
+                OpenGamepadOrFallback(e.gdevice.which);
                 return;
             }
             if (type == SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED)
             {
-                CloseGamepad(e.gdevice.which);
+                CloseController(e.gdevice.which);
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_JOYSTICK_ADDED)
+            {
+                OpenGamepadOrFallback(e.jdevice.which);
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_JOYSTICK_REMOVED)
+            {
+                CloseController(e.jdevice.which);
                 return;
             }
             if (type == SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION)
@@ -176,31 +364,48 @@ namespace UnityShim.AudioInput
             }
             if (type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN || type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP)
             {
-                bool isDown = type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN;
-                var btn = e.gbutton.Button;
-                if (isDown)
-                {
-                    if (_gpButtonsHeld.Add(btn)) _gpButtonsDown.Add(btn);
-                }
-                else
-                {
-                    _gpButtonsHeld.Remove(btn);
-                }
+                ProcessGamepadButton(e.gbutton.Button, type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+                return;
+            }
 
-                if (!_controllerEnabled || MenuPaused) return;
-
-                int mappedKc = MapGamepadButtonToKeyCode(btn);
-                if (mappedKc != 0)
+            if (type == SDL_EventType.SDL_EVENT_JOYSTICK_AXIS_MOTION)
+            {
+                if (!_rawJoysticks.ContainsKey((uint)e.jaxis.which)) return;
+                float norm = Math.Clamp(e.jaxis.value / 32767f, -1f, 1f);
+                switch (e.jaxis.axis)
                 {
-                    if (isDown)
-                    {
-                        if (_gpMappedHeld.Add(mappedKc) && !_held.Contains(mappedKc)) _down.Add(mappedKc);
-                    }
-                    else
-                    {
-                        if (_gpMappedHeld.Remove(mappedKc) && !_held.Contains(mappedKc)) _up.Add(mappedKc);
-                    }
+                    case 0: _gpLeftX = norm; break;
+                    case 1: _gpLeftY = norm; break;
+                    case 2: _gpRightX = norm; break;
+                    case 3: _gpRightY = norm; break;
                 }
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_JOYSTICK_BUTTON_DOWN || type == SDL_EventType.SDL_EVENT_JOYSTICK_BUTTON_UP)
+            {
+                if (!_rawJoysticks.ContainsKey((uint)e.jbutton.which)) return;
+                SDL_GamepadButton btn = e.jbutton.button switch
+                {
+                    0 => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH,
+                    1 => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_EAST,
+                    2 => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST,
+                    3 => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_NORTH,
+                    6 or 7 or 9 => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START,
+                    _ => SDL_GamepadButton.SDL_GAMEPAD_BUTTON_INVALID
+                };
+                ProcessGamepadButton(btn, type == SDL_EventType.SDL_EVENT_JOYSTICK_BUTTON_DOWN);
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_JOYSTICK_HAT_MOTION)
+            {
+                if (!_rawJoysticks.ContainsKey((uint)e.jhat.which)) return;
+                byte hv = e.jhat.value;
+                byte diff = (byte)(hv ^ _rawHatPrev);
+                _rawHatPrev = hv;
+                if ((diff & 1) != 0) ProcessGamepadButton(SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP, (hv & 1) != 0);
+                if ((diff & 2) != 0) ProcessGamepadButton(SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT, (hv & 2) != 0);
+                if ((diff & 4) != 0) ProcessGamepadButton(SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN, (hv & 4) != 0);
+                if ((diff & 8) != 0) ProcessGamepadButton(SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT, (hv & 8) != 0);
                 return;
             }
 
@@ -468,6 +673,11 @@ namespace UnityShim.AudioInput
                 if (ptr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)ptr);
             }
             _gamepads.Clear();
+            foreach (nint ptr in _rawJoysticks.Values)
+            {
+                if (ptr != 0) SDL3.SDL_CloseJoystick((SDL_Joystick*)ptr);
+            }
+            _rawJoysticks.Clear();
         }
     }
 }

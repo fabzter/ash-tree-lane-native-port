@@ -9,6 +9,7 @@ namespace UnityShim.Backend
     public static class SdlNative
     {
         private static bool _initialized;
+        public static string LoadedLibraryPath { get; private set; } = string.Empty;
 
         public static void EnsureInitialized()
         {
@@ -35,6 +36,7 @@ namespace UnityShim.Backend
                 {
                     if (File.Exists(path) && NativeLibrary.TryLoad(path, out nint handle))
                     {
+                        LoadedLibraryPath = path;
                         return handle;
                     }
                 }

@@ -43,6 +43,7 @@ namespace AshTreeLane
             bool noPostFx = false;
             bool nullRender = false;
             bool testGamepad = false;
+            bool logGamepad = false;
             float initialYaw = 0f;
             var scheduledKeys = new List<ScheduledKey>();
 
@@ -98,6 +99,9 @@ namespace AshTreeLane
                     case "--test-gamepad":
                         testGamepad = true;
                         break;
+                    case "--log-gamepad":
+                        logGamepad = true;
+                        break;
                     case "--yaw" when i + 1 < args.Length:
                         float.TryParse(args[++i], out initialYaw);
                         break;
@@ -129,34 +133,23 @@ namespace AshTreeLane
             if (cliFullscreen.HasValue) settings.Fullscreen = cliFullscreen.Value;
             if (cliController.HasValue) settings.ControllerEnabled = cliController.Value;
 
-            if (testGamepad)
+            // Disable HIDAPI Switch calibration hijack (Bluetooth DS4 presents 0x057e:0x2009 and fails SPI
+            // calibration under HIDAPI_SWITCH=1) while enabling MFi/GCController + PS4/PS5 HIDAPI + background events.
+            (string Key, string Val)[] sdlHints =
             {
-                byte[] hintName = Encoding.ASCII.GetBytes("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS\0");
-                byte[] hintVal = Encoding.ASCII.GetBytes("1\0");
-                fixed (byte* pHn = hintName)
-                fixed (byte* pHv = hintVal)
-                {
-                    SDL3.SDL_SetHint(pHn, pHv);
-                }
-            }
-
-            // Enable SDL HIDAPI joystick drivers so Bluetooth PS4/PS5/Switch pads are detected
-            // (the default macOS IOKit driver misses them). Must be set BEFORE SDL_Init.
-            // HIDAPI Switch driver hijacks PS4 pads and fails calibration; keep it OFF so the
-            // PS4/PS5 drivers claim their own devices.
-            var hints = new (string, string)[] {
                 ("SDL_JOYSTICK_HIDAPI", "1"),
                 ("SDL_JOYSTICK_HIDAPI_PS4", "1"),
                 ("SDL_JOYSTICK_HIDAPI_PS5", "1"),
                 ("SDL_JOYSTICK_HIDAPI_SWITCH", "0"),
-                ("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"),
+                ("SDL_JOYSTICK_MFI", "1"),
+                ("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
             };
-            foreach (var (h, v) in hints)
+            foreach (var (hk, hv) in sdlHints)
             {
-                byte[] hn = Encoding.ASCII.GetBytes(h + "\0");
-                byte[] hv = Encoding.ASCII.GetBytes(v + "\0");
+                byte[] hn = Encoding.ASCII.GetBytes(hk + "\0");
+                byte[] hvb = Encoding.ASCII.GetBytes(hv + "\0");
                 fixed (byte* pHn = hn)
-                fixed (byte* pHv = hv)
+                fixed (byte* pHv = hvb)
                 {
                     SDL3.SDL_SetHint(pHn, pHv);
                 }
@@ -167,6 +160,8 @@ namespace AshTreeLane
                 Console.Error.WriteLine($"SDL_Init failed: {SdlNative.GetErrorString()}");
                 return 1;
             }
+            int sdlVer = SDL3.SDL_GetVersion();
+            Console.WriteLine($"[SDL] Loaded {SdlNative.LoadedLibraryPath} (version {sdlVer / 1000000}.{(sdlVer / 1000) % 1000}.{sdlVer % 1000})");
 
             SDL_WindowFlags winFlags = SDL_WindowFlags.SDL_WINDOW_RESIZABLE;
             if (settings.Fullscreen) winFlags |= SDL_WindowFlags.SDL_WINDOW_FULLSCREEN;
@@ -233,6 +228,7 @@ namespace AshTreeLane
                 var sw = Stopwatch.StartNew();
                 double lastTime = sw.Elapsed.TotalSeconds;
                 double fixedAccum = 0.0;
+                double nextPadRescanTime = 0.25;
                 const float fixedDt = 1f / 60f;
                 int frame = 0;
 
@@ -246,6 +242,19 @@ namespace AshTreeLane
                     Time.frameCount = frame;
 
                     input.BeginFrame();
+                    if (now >= nextPadRescanTime)
+                    {
+                        input.RescanControllers();
+                        if (now < 5.0 || input.ConnectedGamepadCount == 0)
+                        {
+                            nextPadRescanTime = now + (now < 5.0 ? 0.5 : 2.5);
+                        }
+                        else
+                        {
+                            nextPadRescanTime = double.MaxValue;
+                        }
+                    }
+
                     SDL_Event ev;
                     while (SDL3.SDL_PollEvent(&ev))
                     {
@@ -256,17 +265,10 @@ namespace AshTreeLane
                             break;
                         }
 
-                        if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_ADDED || evType == SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED)
+                        if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_ADDED || evType == SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED ||
+                            evType == SDL_EventType.SDL_EVENT_JOYSTICK_ADDED || evType == SDL_EventType.SDL_EVENT_JOYSTICK_REMOVED)
                         {
                             input.HandleEvent(in ev);
-                            continue;
-                        }
-
-                        if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev.gbutton.Button == SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START && input.ControllerEnabled)
-                        {
-                            input.HandleEvent(in ev);
-                            if (pauseMenu.IsOpen) pauseMenu.Close(input);
-                            else pauseMenu.Open(input);
                             continue;
                         }
 
@@ -293,12 +295,13 @@ namespace AshTreeLane
                                 var (px, py) = WindowToPixel(renderer.Window, ev.button.x, ev.button.y);
                                 pauseMenu.HandleMouseClick(px, py, input);
                             }
-                            else if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN && input.ControllerEnabled)
-                            {
-                                input.HandleEvent(in ev);
-                                pauseMenu.HandleGamepadButton(ev.gbutton.Button, input);
-                            }
-                            else if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP || evType == SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION)
+                            else if (evType == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+                                     evType == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP ||
+                                     evType == SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION ||
+                                     evType == SDL_EventType.SDL_EVENT_JOYSTICK_BUTTON_DOWN ||
+                                     evType == SDL_EventType.SDL_EVENT_JOYSTICK_BUTTON_UP ||
+                                     evType == SDL_EventType.SDL_EVENT_JOYSTICK_AXIS_MOTION ||
+                                     evType == SDL_EventType.SDL_EVENT_JOYSTICK_HAT_MOTION)
                             {
                                 input.HandleEvent(in ev);
                             }
@@ -310,6 +313,27 @@ namespace AshTreeLane
                             HandleHostHotkeys(ev.key.scancode, sceneLoader, renderer, ref running);
                         }
                         input.HandleEvent(in ev);
+                    }
+
+                    if (input.ConsumePauseToggleRequest() && input.ControllerEnabled)
+                    {
+                        if (pauseMenu.IsOpen) pauseMenu.Close(input);
+                        else pauseMenu.Open(input);
+                    }
+                    else if (pauseMenu.IsOpen && input.ControllerEnabled)
+                    {
+                        var btns = input.DrainMenuGamepadButtons();
+                        for (int b = 0; b < btns.Count; b++)
+                        {
+                            pauseMenu.HandleGamepadButton(btns[b], input);
+                        }
+                    }
+
+                    input.PollConnectedControllers();
+
+                    if (logGamepad && (frame == 1 || frame % 15 == 0))
+                    {
+                        Console.WriteLine($"[PadLog f={frame}] pads={input.ConnectedGamepadCount} ({input.ActiveGamepadName}) H={Input.GetAxis("Horizontal"):F3} V={Input.GetAxis("Vertical"):F3} MX={Input.GetAxisRaw("Mouse X"):F3} MY={Input.GetAxisRaw("Mouse Y"):F3} {input.GetRawAxisDebugString()}");
                     }
 
                     // Route scheduled synthetic keys cleanly to Pause Menu or gameplay Input
@@ -421,6 +445,69 @@ namespace AshTreeLane
             MetalRenderer renderer, SceneLoader sceneLoader, PauseMenuOverlay pauseMenu,
             string screenshotPath)
         {
+            bool passed = true;
+            void Check(bool cond, string msg)
+            {
+                if (!cond) { Console.Error.WriteLine($"[GamepadTest] FAIL: {msg}"); passed = false; }
+                else Console.WriteLine($"[GamepadTest] PASS: {msg}");
+            }
+
+            void PumpFrames(int n, float dt = 1f / 60f, bool render = true, int syntheticEFrame = -1)
+            {
+                for (int f = 0; f < n; f++)
+                {
+                    Time.fixedDeltaTime = dt;
+                    input.BeginFrame();
+                    SDL3.SDL_UpdateJoysticks();
+                    SDL3.SDL_UpdateGamepads();
+                    SDL_Event ev;
+                    while (SDL3.SDL_PollEvent(&ev))
+                    {
+                        input.HandleEvent(in ev);
+                    }
+                    if (input.ConsumePauseToggleRequest() && input.ControllerEnabled)
+                    {
+                        if (pauseMenu.IsOpen) pauseMenu.Close(input);
+                        else pauseMenu.Open(input);
+                    }
+                    input.PollConnectedControllers();
+                    if (f == syntheticEFrame) input.InjectSyntheticKey((int)KeyCode.E, true);
+                    if (f == syntheticEFrame + 2) input.InjectSyntheticKey((int)KeyCode.E, false);
+
+                    if (pauseMenu.IsOpen)
+                    {
+                        Time.timeScale = 0f;
+                        Time.deltaTime = 0f;
+                        Time.unscaledTime += dt;
+                    }
+                    else
+                    {
+                        Time.timeScale = 1f;
+                        Time.deltaTime = dt;
+                        Time.time += dt;
+                        Time.unscaledTime += dt;
+                        input.UpdateSmoothedAxes(dt);
+                        sceneLoader.ConsumePendingSceneLoad();
+                        SceneRegistry.DispatchFixedUpdate();
+                        physics.Step(dt);
+                        SceneRegistry.DispatchUpdate();
+                        UnityEngine.Animation.StepAll(dt);
+                        SceneRegistry.DispatchLateUpdate();
+                        audio.Tick(dt);
+                    }
+                    if (render) renderer.RenderFrame();
+                }
+            }
+
+            // Settle initial instruction fade + allow async GCController/MFi physical pads to arrive first
+            PumpFrames(65, render: false, syntheticEFrame: 2);
+            input.RescanControllers();
+            int basePadCount = input.ConnectedGamepadCount;
+            if (basePadCount > 0)
+            {
+                Console.WriteLine($"[GamepadTest] PASS: Physical pad detected at baseline (count={basePadCount}, name={input.ActiveGamepadName})");
+            }
+
             Console.WriteLine("[GamepadTest] Attaching SDL3 virtual gamepad...");
             byte[] vname = Encoding.UTF8.GetBytes("Virtual Xbox Pad\0");
             SDL_JoystickID virtId;
@@ -453,66 +540,10 @@ namespace AshTreeLane
                 return 1;
             }
 
-            bool passed = true;
-            void Check(bool cond, string msg)
-            {
-                if (!cond) { Console.Error.WriteLine($"[GamepadTest] FAIL: {msg}"); passed = false; }
-                else Console.WriteLine($"[GamepadTest] PASS: {msg}");
-            }
-
-            void PumpFrames(int n, float dt = 1f / 60f, bool render = true, int syntheticEFrame = -1)
-            {
-                for (int f = 0; f < n; f++)
-                {
-                    Time.fixedDeltaTime = dt;
-                    input.BeginFrame();
-                    SDL3.SDL_UpdateJoysticks();
-                    SDL3.SDL_UpdateGamepads();
-                    SDL_Event ev;
-                    while (SDL3.SDL_PollEvent(&ev))
-                    {
-                        var et = ev.Type;
-                        if (et == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev.gbutton.Button == SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START && input.ControllerEnabled)
-                        {
-                            input.HandleEvent(in ev);
-                            if (pauseMenu.IsOpen) pauseMenu.Close(input);
-                            else pauseMenu.Open(input);
-                            continue;
-                        }
-                        input.HandleEvent(in ev);
-                    }
-                    if (f == syntheticEFrame) input.InjectSyntheticKey((int)KeyCode.E, true);
-                    if (f == syntheticEFrame + 2) input.InjectSyntheticKey((int)KeyCode.E, false);
-
-                    if (pauseMenu.IsOpen)
-                    {
-                        Time.timeScale = 0f;
-                        Time.deltaTime = 0f;
-                        Time.unscaledTime += dt;
-                    }
-                    else
-                    {
-                        Time.timeScale = 1f;
-                        Time.deltaTime = dt;
-                        Time.time += dt;
-                        Time.unscaledTime += dt;
-                        input.UpdateSmoothedAxes(dt);
-                        sceneLoader.ConsumePendingSceneLoad();
-                        SceneRegistry.DispatchFixedUpdate();
-                        physics.Step(dt);
-                        SceneRegistry.DispatchUpdate();
-                        UnityEngine.Animation.StepAll(dt);
-                        SceneRegistry.DispatchLateUpdate();
-                        audio.Tick(dt);
-                    }
-                    if (render) renderer.RenderFrame();
-                }
-            }
-
-            // Dismiss instructions cleanly (Wait ~65 frames for fade animation)
-            PumpFrames(65, render: false, syntheticEFrame: 2);
+            PumpFrames(3, render: false);
+            input.RescanControllers();
             Check(SDL3.SDL_IsGamepad(virtId), "SDL_IsGamepad recognises virtual joystick as SDL_Gamepad");
-            Check(input.ConnectedGamepadCount >= 1, $"SDL_EVENT_GAMEPAD_ADDED opened gamepad (count={input.ConnectedGamepadCount})");
+            Check(input.ConnectedGamepadCount == basePadCount + 1, $"SDL_EVENT_GAMEPAD_ADDED opened gamepad (count={input.ConnectedGamepadCount})");
 
             // 1. Deadzone test (3000/32767 = 0.091 < 0.18 deadzone)
             SDL3.SDL_SetJoystickVirtualAxis(vjoy, (int)SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX, 3000);
@@ -597,7 +628,76 @@ namespace AshTreeLane
             SDL3.SDL_CloseJoystick(vjoy);
             SDL3.SDL_DetachVirtualJoystick(virtId);
             PumpFrames(2, render: false);
-            Check(input.ConnectedGamepadCount == 0, $"SDL_EVENT_GAMEPAD_REMOVED detached pad (count={input.ConnectedGamepadCount})");
+            Check(input.ConnectedGamepadCount == basePadCount, $"SDL_EVENT_GAMEPAD_REMOVED detached pad (count={input.ConnectedGamepadCount})");
+
+            // 8. Unmapped Raw Joystick fallback (SDL_JOYSTICK_TYPE_UNKNOWN, SDL_IsGamepad == false)
+            byte[] rname = Encoding.UTF8.GetBytes("Raw Generic Stick\0");
+            SDL_JoystickID rawId;
+            fixed (byte* pRName = rname)
+            {
+                var rdesc = new SDL_VirtualJoystickDesc
+                {
+                    version = (uint)sizeof(SDL_VirtualJoystickDesc),
+                    type = (ushort)SDL_JoystickType.SDL_JOYSTICK_TYPE_UNKNOWN,
+                    vendor_id = 0x1209,
+                    product_id = 0x0001,
+                    naxes = 4,
+                    nbuttons = 10,
+                    nhats = 1,
+                    button_mask = 0x3FFu,
+                    axis_mask = 0x0Fu,
+                    name = pRName
+                };
+                rawId = SDL3.SDL_AttachVirtualJoystick(&rdesc);
+            }
+            SDL_Joystick* rjoy = SDL3.SDL_OpenJoystick(rawId);
+            PumpFrames(3, render: false);
+            Check(!SDL3.SDL_IsGamepad(rawId) && input.ConnectedGamepadCount >= basePadCount + 1,
+                  $"Unmapped joystick opened via raw fallback (count={input.ConnectedGamepadCount})");
+
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 0, -32000);
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 1, -32000);
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 2, 26000);
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 3, -16000);
+            PumpFrames(8, render: false);
+            Check(Input.GetAxis("Horizontal") < -0.65f && Input.GetAxis("Vertical") > 0.65f &&
+                  Input.GetAxisRaw("Mouse X") > 0.5f && Input.GetAxisRaw("Mouse Y") > 0.25f,
+                  $"Raw joystick axes drive H={Input.GetAxis("Horizontal"):F2} V={Input.GetAxis("Vertical"):F2} MX={Input.GetAxisRaw("Mouse X"):F2} MY={Input.GetAxisRaw("Mouse Y"):F2}");
+
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 0, 0); SDL3.SDL_SetJoystickVirtualAxis(rjoy, 1, 0);
+            SDL3.SDL_SetJoystickVirtualAxis(rjoy, 2, 0); SDL3.SDL_SetJoystickVirtualAxis(rjoy, 3, 0);
+            PumpFrames(2, render: false);
+
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 0, true);
+            input.BeginFrame(); SDL3.SDL_UpdateJoysticks();
+            { SDL_Event ev; while (SDL3.SDL_PollEvent(&ev)) input.HandleEvent(in ev); }
+            Check(Input.GetButtonDown("Jump") && Input.GetKeyDown("space"), "Raw fallback button 0 -> Jump & space");
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 0, false); PumpFrames(2, render: false);
+
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 2, true);
+            input.BeginFrame(); SDL3.SDL_UpdateJoysticks();
+            { SDL_Event ev; while (SDL3.SDL_PollEvent(&ev)) input.HandleEvent(in ev); }
+            Check(Input.GetKeyDown(KeyCode.E), "Raw fallback button 2 -> KeyCode.E");
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 2, false); PumpFrames(2, render: false);
+
+            SDL3.SDL_SetJoystickVirtualHat(rjoy, 0, 1); // Up
+            input.BeginFrame(); SDL3.SDL_UpdateJoysticks();
+            { SDL_Event ev; while (SDL3.SDL_PollEvent(&ev)) input.HandleEvent(in ev); }
+            Check(Input.GetKeyDown(KeyCode.W) && Input.GetAxisRaw("Vertical") > 0.5f, "Raw fallback hat UP -> KeyCode.W & Vertical");
+            SDL3.SDL_SetJoystickVirtualHat(rjoy, 0, 0); PumpFrames(2, render: false);
+
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 9, true);
+            PumpFrames(1, render: false);
+            Check(pauseMenu.IsOpen && Time.timeScale == 0f, "Raw fallback button 9 -> Pause Menu opens");
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 9, false);
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 9, true);
+            PumpFrames(1, render: false);
+            SDL3.SDL_SetJoystickVirtualButton(rjoy, 9, false);
+
+            SDL3.SDL_CloseJoystick(rjoy);
+            SDL3.SDL_DetachVirtualJoystick(rawId);
+            PumpFrames(2, render: false);
+            Check(input.ConnectedGamepadCount == basePadCount, $"Raw joystick detached cleanly (count={input.ConnectedGamepadCount})");
 
             Console.WriteLine(passed ? "[GamepadTest] ALL CHECKS PASSED" : "[GamepadTest] SOME CHECKS FAILED");
             return passed ? 0 : 1;
