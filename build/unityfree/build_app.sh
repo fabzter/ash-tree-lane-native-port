@@ -23,6 +23,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+# Ensure the CURRENT homebrew SDL3 is bundled (NuGet/publish may ship a stale native lib that
+# lacks proper HIDAPI PS4 detection).
+if [ -f /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib ]; then
+  cp -f /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib "$APP/Contents/MacOS/libSDL3.0.dylib"
+fi
 codesign --force --deep -s - "$APP"
 echo "== built: $APP =="
 echo "run: open \"$APP\""

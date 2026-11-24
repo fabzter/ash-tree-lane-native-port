@@ -102,20 +102,20 @@ namespace AshTreeLane
                         float.TryParse(args[++i], out initialYaw);
                         break;
                     case "--send-key" when i + 1 < args.Length:
-                    {
-                        var parts = args[++i].Split(':');
-                        if (parts.Length >= 2 && int.TryParse(parts[1], out int f))
                         {
-                            int endF = parts.Length >= 3 && int.TryParse(parts[2], out int ef) ? ef : f + 2;
-                            scheduledKeys.Add(new ScheduledKey
+                            var parts = args[++i].Split(':');
+                            if (parts.Length >= 2 && int.TryParse(parts[1], out int f))
                             {
-                                KeyCode = SdlInputBackend.NameToKeyCode(parts[0]),
-                                StartFrame = f,
-                                EndFrame = endF
-                            });
+                                int endF = parts.Length >= 3 && int.TryParse(parts[2], out int ef) ? ef : f + 2;
+                                scheduledKeys.Add(new ScheduledKey
+                                {
+                                    KeyCode = SdlInputBackend.NameToKeyCode(parts[0]),
+                                    StartFrame = f,
+                                    EndFrame = endF
+                                });
+                            }
+                            break;
                         }
-                        break;
-                    }
                 }
             }
 
@@ -140,7 +140,29 @@ namespace AshTreeLane
                 }
             }
 
-            if (!SDL3.SDL_Init(SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_AUDIO | SDL_InitFlags.SDL_INIT_GAMEPAD))
+            // Enable SDL HIDAPI joystick drivers so Bluetooth PS4/PS5/Switch pads are detected
+            // (the default macOS IOKit driver misses them). Must be set BEFORE SDL_Init.
+            // HIDAPI Switch driver hijacks PS4 pads and fails calibration; keep it OFF so the
+            // PS4/PS5 drivers claim their own devices.
+            var hints = new (string, string)[] {
+                ("SDL_JOYSTICK_HIDAPI", "1"),
+                ("SDL_JOYSTICK_HIDAPI_PS4", "1"),
+                ("SDL_JOYSTICK_HIDAPI_PS5", "1"),
+                ("SDL_JOYSTICK_HIDAPI_SWITCH", "0"),
+                ("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"),
+            };
+            foreach (var (h, v) in hints)
+            {
+                byte[] hn = Encoding.ASCII.GetBytes(h + "\0");
+                byte[] hv = Encoding.ASCII.GetBytes(v + "\0");
+                fixed (byte* pHn = hn)
+                fixed (byte* pHv = hv)
+                {
+                    SDL3.SDL_SetHint(pHn, pHv);
+                }
+            }
+
+            if (!SDL3.SDL_Init(SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_AUDIO | SDL_InitFlags.SDL_INIT_JOYSTICK | SDL_InitFlags.SDL_INIT_GAMEPAD))
             {
                 Console.Error.WriteLine($"SDL_Init failed: {SdlNative.GetErrorString()}");
                 return 1;
