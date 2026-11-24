@@ -83,11 +83,47 @@ namespace UnityShim.Rendering
         public bool Point;
     }
 
+    public sealed class OverlayDrawContext
+    {
+        private readonly MetalRenderer _renderer;
+        private readonly int _whiteTexId;
+
+        public int Width { get; }
+        public int Height { get; }
+        public float UiScale { get; }
+
+        internal OverlayDrawContext(MetalRenderer renderer, int width, int height, float uiScale, int whiteTexId)
+        {
+            _renderer = renderer;
+            Width = width;
+            Height = height;
+            UiScale = uiScale;
+            _whiteTexId = whiteTexId;
+        }
+
+        public void DrawRect(float x, float y, float w, float h, Color color)
+            => _renderer.EmitQuad(x, y, x + w, y + h, 0f, 0f, 1f, 1f, color, _whiteTexId);
+
+        public void DrawRectOutline(float x, float y, float w, float h, float t, Color color)
+        {
+            DrawRect(x, y, w, t, color);
+            DrawRect(x, y + h - t, w, t, color);
+            DrawRect(x, y + t, t, MathF.Max(0f, h - 2f * t), color);
+            DrawRect(x + w - t, y + t, t, MathF.Max(0f, h - 2f * t), color);
+        }
+
+        public void DrawText(string text, float x, float y, float w, float h, int fontSize, Color color, bool centered = true)
+            => _renderer.EmitTextString(text, fontSize, color, x, y, w, h, UiScale, centered);
+    }
+
     public unsafe sealed class MetalRenderer : IRenderBackend, IDisposable
     {
-        private readonly SDL_Window* _window;
+        private SDL_Window* _window;
         private readonly SDL_GPUDevice* _device;
         private readonly string _shaderDir;
+
+        public SDL_Window* Window => _window;
+        public Action<OverlayDrawContext> OverlayRenderer { get; set; }
 
         private SDL_GPUSampler* _sampLinearWrap;
         private SDL_GPUSampler* _sampLinearClamp;
@@ -478,6 +514,63 @@ namespace UnityShim.Rendering
         }
 
         public void RequestScreenshot(string outputPath) => _pendingScreenshot = outputPath;
+
+        public SDL_Window* RecreateWindowAndSwapchain(int width, int height, bool fullscreen, bool restoreCursorLocked)
+        {
+            width = Math.Max(640, width);
+            height = Math.Max(360, height);
+
+            SDL3.SDL_WaitForGPUIdle(_device);
+
+            RenderTexture.ClearPool();
+            if (_sceneRt != null) { ReleaseRenderTarget(_sceneRt.GpuTextureId); _sceneRt = null; }
+            if (_finalRt != null) { ReleaseRenderTarget(_finalRt.GpuTextureId); _finalRt = null; }
+            if (_depthTex != null) { SDL3.SDL_ReleaseGPUTexture(_device, _depthTex); _depthTex = null; }
+            _rtW = 0;
+            _rtH = 0;
+
+            if (_window != null)
+            {
+                SDL3.SDL_ReleaseWindowFromGPUDevice(_device, _window);
+                SDL3.SDL_DestroyWindow(_window);
+                _window = null;
+            }
+
+            SDL_WindowFlags flags = SDL_WindowFlags.SDL_WINDOW_RESIZABLE;
+            if (fullscreen) flags |= SDL_WindowFlags.SDL_WINDOW_FULLSCREEN;
+
+            byte[] titleUtf8 = Encoding.UTF8.GetBytes("The House On Ash Tree Lane\0");
+            SDL_Window* newWin;
+            fixed (byte* pTitle = titleUtf8)
+            {
+                newWin = SDL3.SDL_CreateWindow(pTitle, width, height, flags);
+            }
+            if (newWin == null)
+            {
+                throw new InvalidOperationException($"SDL_CreateWindow failed during swapchain recreate: {SdlNative.GetErrorString()}");
+            }
+            if (!SDL3.SDL_ClaimWindowForGPUDevice(_device, newWin))
+            {
+                throw new InvalidOperationException($"SDL_ClaimWindowForGPUDevice failed during swapchain recreate: {SdlNative.GetErrorString()}");
+            }
+
+            _window = newWin;
+            EngineHost.WindowHandle = newWin;
+
+            if (!fullscreen)
+            {
+                SDL3.SDL_SetWindowPosition(_window, (int)SDL3.SDL_WINDOWPOS_CENTERED, (int)SDL3.SDL_WINDOWPOS_CENTERED);
+            }
+            SDL3.SDL_SetWindowRelativeMouseMode(_window, restoreCursorLocked);
+
+            int pw = width, ph = height;
+            SDL3.SDL_GetWindowSizeInPixels(_window, &pw, &ph);
+            Screen.width = Math.Max(1, pw);
+            Screen.height = Math.Max(1, ph);
+
+            Console.WriteLine($"[Display] Recreated window/swapchain: {Screen.width}x{Screen.height} (requested {width}x{height}, fullscreen={fullscreen})");
+            return _window;
+        }
 
         private void Trace(string step) { if (TraceRender) Console.WriteLine($"[RenderTrace] {step}"); }
 
@@ -891,6 +984,8 @@ namespace UnityShim.Rendering
                 CollectUiTree(c.transform, rootRect, uiScale, whiteTexId);
             }
 
+            OverlayRenderer?.Invoke(new OverlayDrawContext(this, winW, winH, uiScale, whiteTexId));
+
             if (_uiVerts.Count == 0 || !_textures.TryGetValue(_finalRt.GpuTextureId, out var finalRec)) return;
 
             int bytesNeeded = _uiVerts.Count * sizeof(UiVertex);
@@ -971,13 +1066,16 @@ namespace UnityShim.Rendering
         }
 
         private void EmitTextQuads(Text txt, float rx, float ry, float rw, float rh, float uiScale)
+            => EmitTextString(txt.text, txt.fontSize, txt.color, rx, ry, rw, rh, uiScale, centered: true);
+
+        internal void EmitTextString(string s, int fontSize, Color color, float rx, float ry, float rw, float rh, float uiScale, bool centered)
         {
             var atlas = FontAtlas.Default;
-            float pxScale = (Math.Max(8, txt.fontSize) * uiScale) / atlas.BasePixelHeight;
-            string s = txt.text;
+            if (atlas == null || string.IsNullOrEmpty(s)) return;
+            float pxScale = (Math.Max(8, fontSize) * uiScale) / atlas.BasePixelHeight;
             float lineW = atlas.MeasureLineWidth(s, pxScale);
             float lineH = atlas.LineHeightPx * pxScale;
-            float cursorX = rx + (rw - lineW) * 0.5f;
+            float cursorX = centered ? rx + (rw - lineW) * 0.5f : rx + 14f * uiScale;
             float baselineY = ry + (rh - lineH) * 0.5f + atlas.AscentPx * pxScale;
             int tid = atlas.AtlasTexture.GpuTextureId;
 
@@ -988,13 +1086,13 @@ namespace UnityShim.Rendering
                 {
                     float gx0 = cursorX + g.XOff * pxScale;
                     float gy0 = baselineY + g.YOff * pxScale;
-                    EmitQuad(gx0, gy0, gx0 + g.W * pxScale, gy0 + g.H * pxScale, g.U0, g.V0, g.U1, g.V1, txt.color, tid);
+                    EmitQuad(gx0, gy0, gx0 + g.W * pxScale, gy0 + g.H * pxScale, g.U0, g.V0, g.U1, g.V1, color, tid);
                 }
                 cursorX += g.Advance * pxScale;
             }
         }
 
-        private void EmitQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, Color c, int texId)
+        internal void EmitQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, Color c, int texId)
         {
             int start = _uiVerts.Count;
             _uiVerts.Add(new UiVertex { X = x0, Y = y0, U = u0, V = v0, R = c.r, G = c.g, B = c.b, A = c.a });

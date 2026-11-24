@@ -7,6 +7,8 @@ namespace UnityShim.Backend
     {
         bool AnyKey { get; }
         bool AnyKeyDown { get; }
+        bool ControllerEnabled { get; set; }
+        int ConnectedGamepadCount { get; }
         bool GetKey(int keyCode);
         bool GetKeyDown(int keyCode);
         bool GetKeyUp(int keyCode);

@@ -1,27 +1,126 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using SDL;
 using UnityEngine;
 using UnityShim.Backend;
 
 namespace UnityShim.AudioInput
 {
-    public unsafe sealed class SdlInputBackend : IInputBackend
+    public unsafe sealed class SdlInputBackend : IInputBackend, IDisposable
     {
         private readonly HashSet<int> _held = new();
+        private readonly HashSet<int> _gpMappedHeld = new();
         private readonly HashSet<int> _down = new();
         private readonly HashSet<int> _up = new();
         private readonly HashSet<int> _synthHeld = new();
-        private float _mouseDx, _mouseDy;
-        private float _horizSmoothed, _vertSmoothed;
 
-        public bool AnyKey => _held.Count > 0 || _down.Count > 0;
+        private readonly Dictionary<uint, nint> _gamepads = new();
+        private readonly HashSet<SDL_GamepadButton> _gpButtonsHeld = new();
+        private readonly HashSet<SDL_GamepadButton> _gpButtonsDown = new();
+
+        private float _mouseDx, _mouseDy;
+        private float _gpLeftX, _gpLeftY, _gpRightX, _gpRightY;
+        private float _horizSmoothed, _vertSmoothed;
+        private float _lastDt = 1f / 60f;
+        private bool _controllerEnabled = true;
+
+        public float GamepadDeadzone { get; set; } = 0.18f;
+        public float GamepadLookSpeed { get; set; } = 65f;
+        public bool MenuPaused { get; set; }
+
+        public bool ControllerEnabled
+        {
+            get => _controllerEnabled;
+            set
+            {
+                _controllerEnabled = value;
+                if (!value)
+                {
+                    ClearGamepadMappedState();
+                }
+            }
+        }
+
+        public int ConnectedGamepadCount => _gamepads.Count;
+        public string ActiveGamepadName { get; private set; } = "None";
+
+        public bool AnyKey => _held.Count > 0 || _down.Count > 0 || (_controllerEnabled && !MenuPaused && _gpMappedHeld.Count > 0);
         public bool AnyKeyDown => _down.Count > 0;
+
+        public void InitializeGamepads()
+        {
+            int count = 0;
+            SDL_JoystickID* ids = SDL3.SDL_GetGamepads(&count);
+            if (ids != null)
+            {
+                try
+                {
+                    for (int i = 0; i < count; i++) OpenGamepad(ids[i]);
+                }
+                finally
+                {
+                    SDL3.SDL_free((nint)ids);
+                }
+            }
+        }
+
+        private void ClearGamepadMappedState()
+        {
+            foreach (int kc in _gpMappedHeld)
+            {
+                if (!_held.Contains(kc)) _up.Add(kc);
+            }
+            _gpMappedHeld.Clear();
+            _gpLeftX = 0f;
+            _gpLeftY = 0f;
+            _gpRightX = 0f;
+            _gpRightY = 0f;
+        }
+
+        private void OpenGamepad(SDL_JoystickID id)
+        {
+            uint key = (uint)id;
+            if (_gamepads.ContainsKey(key)) return;
+            SDL_Gamepad* gp = SDL3.SDL_OpenGamepad(id);
+            if (gp == null) return;
+            _gamepads[key] = (nint)gp;
+            byte* pName = SDL3.Unsafe_SDL_GetGamepadName(gp);
+            string name = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Gamepad") : "Gamepad";
+            ActiveGamepadName = name;
+            Console.WriteLine($"[Input] Gamepad connected ({id}): {name}");
+        }
+
+        private void CloseGamepad(SDL_JoystickID id)
+        {
+            uint key = (uint)id;
+            if (_gamepads.Remove(key, out nint ptr))
+            {
+                if (ptr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)ptr);
+                ClearGamepadMappedState();
+                _gpButtonsHeld.Clear();
+                RefreshActiveGamepadName();
+                Console.WriteLine($"[Input] Gamepad disconnected ({id})");
+            }
+        }
+
+        private void RefreshActiveGamepadName()
+        {
+            ActiveGamepadName = "None";
+            foreach (nint ptr in _gamepads.Values)
+            {
+                if (ptr == 0) continue;
+                byte* pName = SDL3.Unsafe_SDL_GetGamepadName((SDL_Gamepad*)ptr);
+                ActiveGamepadName = pName != null ? (Marshal.PtrToStringUTF8((nint)pName) ?? "Gamepad") : "Gamepad";
+                break;
+            }
+        }
 
         public void BeginFrame()
         {
             _down.Clear();
             _up.Clear();
+            _gpButtonsDown.Clear();
             _mouseDx = 0f;
             _mouseDy = 0f;
         }
@@ -29,14 +128,84 @@ namespace UnityShim.AudioInput
         public void ClearAllKeys()
         {
             _held.Clear();
+            _gpMappedHeld.Clear();
             _down.Clear();
             _up.Clear();
             _synthHeld.Clear();
+            _gpButtonsHeld.Clear();
+            _gpButtonsDown.Clear();
+            _mouseDx = 0f;
+            _mouseDy = 0f;
+            _horizSmoothed = 0f;
+            _vertSmoothed = 0f;
+        }
+
+        public bool IsGamepadButtonDown(SDL_GamepadButton btn) => _gpButtonsDown.Contains(btn);
+
+        public (float x, float y) GetLeftStickWithDeadzone()
+        {
+            if (!_controllerEnabled) return (0f, 0f);
+            var (lx, ly) = ApplyRadialDeadzone(_gpLeftX, _gpLeftY, GamepadDeadzone);
+            return (lx, -ly); // +Y = Up / Forward
         }
 
         public void HandleEvent(in SDL_Event e)
         {
             var type = e.Type;
+            if (type == SDL_EventType.SDL_EVENT_GAMEPAD_ADDED)
+            {
+                OpenGamepad(e.gdevice.which);
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED)
+            {
+                CloseGamepad(e.gdevice.which);
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION)
+            {
+                float norm = Math.Clamp(e.gaxis.value / 32767f, -1f, 1f);
+                switch (e.gaxis.Axis)
+                {
+                    case SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTX: _gpLeftX = norm; break;
+                    case SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFTY: _gpLeftY = norm; break;
+                    case SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX: _gpRightX = norm; break;
+                    case SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY: _gpRightY = norm; break;
+                }
+                return;
+            }
+            if (type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN || type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP)
+            {
+                bool isDown = type == SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+                var btn = e.gbutton.Button;
+                if (isDown)
+                {
+                    if (_gpButtonsHeld.Add(btn)) _gpButtonsDown.Add(btn);
+                }
+                else
+                {
+                    _gpButtonsHeld.Remove(btn);
+                }
+
+                if (!_controllerEnabled || MenuPaused) return;
+
+                int mappedKc = MapGamepadButtonToKeyCode(btn);
+                if (mappedKc != 0)
+                {
+                    if (isDown)
+                    {
+                        if (_gpMappedHeld.Add(mappedKc) && !_held.Contains(mappedKc)) _down.Add(mappedKc);
+                    }
+                    else
+                    {
+                        if (_gpMappedHeld.Remove(mappedKc) && !_held.Contains(mappedKc)) _up.Add(mappedKc);
+                    }
+                }
+                return;
+            }
+
+            if (MenuPaused) return;
+
             if (type == SDL_EventType.SDL_EVENT_KEY_DOWN || type == SDL_EventType.SDL_EVENT_KEY_UP)
             {
                 bool isDown = type == SDL_EventType.SDL_EVENT_KEY_DOWN;
@@ -45,11 +214,11 @@ namespace UnityShim.AudioInput
                 if (kc == 0) return;
                 if (isDown)
                 {
-                    if (_held.Add(kc)) _down.Add(kc);
+                    if (_held.Add(kc) && !_gpMappedHeld.Contains(kc)) _down.Add(kc);
                 }
                 else
                 {
-                    if (_held.Remove(kc)) _up.Add(kc);
+                    if (_held.Remove(kc) && !_gpMappedHeld.Contains(kc)) _up.Add(kc);
                 }
             }
             else if (type == SDL_EventType.SDL_EVENT_MOUSE_MOTION)
@@ -75,6 +244,26 @@ namespace UnityShim.AudioInput
             }
         }
 
+        private static int MapGamepadButtonToKeyCode(SDL_GamepadButton btn) => btn switch
+        {
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH => (int)KeyCode.Space,
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST => (int)KeyCode.E,
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP => (int)KeyCode.W,
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN => (int)KeyCode.S,
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT => (int)KeyCode.A,
+            SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT => (int)KeyCode.D,
+            _ => 0
+        };
+
+        private static (float x, float y) ApplyRadialDeadzone(float rx, float ry, float dz)
+        {
+            float mag = MathF.Sqrt(rx * rx + ry * ry);
+            if (mag <= dz || mag < 1e-6f) return (0f, 0f);
+            float scaled = Math.Clamp((mag - dz) / Math.Max(1e-4f, 1f - dz), 0f, 1f);
+            float inv = scaled / mag;
+            return (rx * inv, ry * inv);
+        }
+
         public void InjectSyntheticKey(int keyCode, bool down)
         {
             if (down)
@@ -97,6 +286,7 @@ namespace UnityShim.AudioInput
 
         public void UpdateSmoothedAxes(float dt)
         {
+            _lastDt = Math.Clamp(dt, 0.001f, 0.1f);
             float targetH = RawHoriz();
             float targetV = RawVert();
             float step = MathF.Min(1f, MathF.Max(0.15f, dt * 10f));
@@ -104,7 +294,7 @@ namespace UnityShim.AudioInput
             _vertSmoothed = MathF.Abs(targetV) > 0.01f ? Mathf.MoveTowards(_vertSmoothed, targetV, step) : Mathf.MoveTowards(_vertSmoothed, 0f, step * 1.5f);
         }
 
-        public bool GetKey(int keyCode) => _held.Contains(keyCode);
+        public bool GetKey(int keyCode) => _held.Contains(keyCode) || (_controllerEnabled && !MenuPaused && _gpMappedHeld.Contains(keyCode));
         public bool GetKeyDown(int keyCode) => _down.Contains(keyCode);
         public bool GetKeyUp(int keyCode) => _up.Contains(keyCode);
 
@@ -117,17 +307,53 @@ namespace UnityShim.AudioInput
 
         private float RawHoriz()
         {
+            if (MenuPaused) return 0f;
             float v = 0f;
-            if (_held.Contains((int)KeyCode.A) || _held.Contains((int)KeyCode.LeftArrow)) v -= 1f;
-            if (_held.Contains((int)KeyCode.D) || _held.Contains((int)KeyCode.RightArrow)) v += 1f;
-            return v;
+            if (GetKey((int)KeyCode.A) || GetKey((int)KeyCode.LeftArrow)) v -= 1f;
+            if (GetKey((int)KeyCode.D) || GetKey((int)KeyCode.RightArrow)) v += 1f;
+            if (_controllerEnabled)
+            {
+                var (lx, _) = ApplyRadialDeadzone(_gpLeftX, _gpLeftY, GamepadDeadzone);
+                v += lx;
+            }
+            return Math.Clamp(v, -1f, 1f);
         }
 
         private float RawVert()
         {
+            if (MenuPaused) return 0f;
             float v = 0f;
-            if (_held.Contains((int)KeyCode.S) || _held.Contains((int)KeyCode.DownArrow)) v -= 1f;
-            if (_held.Contains((int)KeyCode.W) || _held.Contains((int)KeyCode.UpArrow)) v += 1f;
+            if (GetKey((int)KeyCode.S) || GetKey((int)KeyCode.DownArrow)) v -= 1f;
+            if (GetKey((int)KeyCode.W) || GetKey((int)KeyCode.UpArrow)) v += 1f;
+            if (_controllerEnabled)
+            {
+                var (_, ly) = ApplyRadialDeadzone(_gpLeftX, _gpLeftY, GamepadDeadzone);
+                v -= ly; // SDL LEFTY up is negative -> Unity Vertical forward is positive
+            }
+            return Math.Clamp(v, -1f, 1f);
+        }
+
+        private float LookMouseX()
+        {
+            if (MenuPaused) return 0f;
+            float v = _mouseDx * 0.1f;
+            if (_controllerEnabled)
+            {
+                var (rx, _) = ApplyRadialDeadzone(_gpRightX, _gpRightY, GamepadDeadzone);
+                v += rx * GamepadLookSpeed * _lastDt;
+            }
+            return v;
+        }
+
+        private float LookMouseY()
+        {
+            if (MenuPaused) return 0f;
+            float v = -_mouseDy * 0.1f;
+            if (_controllerEnabled)
+            {
+                var (_, ry) = ApplyRadialDeadzone(_gpRightX, _gpRightY, GamepadDeadzone);
+                v -= ry * GamepadLookSpeed * _lastDt; // SDL RIGHTY up is negative -> +Mouse Y
+            }
             return v;
         }
 
@@ -135,8 +361,8 @@ namespace UnityShim.AudioInput
         {
             "Horizontal" => _horizSmoothed,
             "Vertical" => _vertSmoothed,
-            "Mouse X" => _mouseDx * 0.1f,
-            "Mouse Y" => -_mouseDy * 0.1f,
+            "Mouse X" => LookMouseX(),
+            "Mouse Y" => LookMouseY(),
             _ => 0f
         };
 
@@ -144,8 +370,8 @@ namespace UnityShim.AudioInput
         {
             "Horizontal" => RawHoriz(),
             "Vertical" => RawVert(),
-            "Mouse X" => _mouseDx * 0.1f,
-            "Mouse Y" => -_mouseDy * 0.1f,
+            "Mouse X" => LookMouseX(),
+            "Mouse Y" => LookMouseY(),
             _ => 0f
         };
 
@@ -183,6 +409,24 @@ namespace UnityShim.AudioInput
             };
         }
 
+        public static SDL_Scancode KeyCodeToScancode(int keyCode) => (KeyCode)keyCode switch
+        {
+            KeyCode.Escape => SDL_Scancode.SDL_SCANCODE_ESCAPE,
+            KeyCode.Return => SDL_Scancode.SDL_SCANCODE_RETURN,
+            KeyCode.Space => SDL_Scancode.SDL_SCANCODE_SPACE,
+            KeyCode.UpArrow => SDL_Scancode.SDL_SCANCODE_UP,
+            KeyCode.DownArrow => SDL_Scancode.SDL_SCANCODE_DOWN,
+            KeyCode.LeftArrow => SDL_Scancode.SDL_SCANCODE_LEFT,
+            KeyCode.RightArrow => SDL_Scancode.SDL_SCANCODE_RIGHT,
+            KeyCode.W => SDL_Scancode.SDL_SCANCODE_W,
+            KeyCode.A => SDL_Scancode.SDL_SCANCODE_A,
+            KeyCode.S => SDL_Scancode.SDL_SCANCODE_S,
+            KeyCode.D => SDL_Scancode.SDL_SCANCODE_D,
+            KeyCode.E => SDL_Scancode.SDL_SCANCODE_E,
+            KeyCode.F => SDL_Scancode.SDL_SCANCODE_F,
+            _ => SDL_Scancode.SDL_SCANCODE_UNKNOWN
+        };
+
         private static int MapScancode(SDL_Scancode sc)
         {
             if (sc >= SDL_Scancode.SDL_SCANCODE_A && sc <= SDL_Scancode.SDL_SCANCODE_Z)
@@ -215,6 +459,15 @@ namespace UnityShim.AudioInput
                 SDL_Scancode.SDL_SCANCODE_RSHIFT => (int)KeyCode.RightShift,
                 _ => 0
             };
+        }
+
+        public void Dispose()
+        {
+            foreach (nint ptr in _gamepads.Values)
+            {
+                if (ptr != 0) SDL3.SDL_CloseGamepad((SDL_Gamepad*)ptr);
+            }
+            _gamepads.Clear();
         }
     }
 }
