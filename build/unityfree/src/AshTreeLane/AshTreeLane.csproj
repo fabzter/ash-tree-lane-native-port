@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>AshTreeLane</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../UnityShim/UnityShim.csproj" />
+    <ProjectReference Include="../GameScripts/GameScripts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="../Shaders/*.metal">
+      <Link>Shaders/%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <None Include="/opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib" Condition="Exists('/opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib')">
+      <Link>libSDL3.0.dylib</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

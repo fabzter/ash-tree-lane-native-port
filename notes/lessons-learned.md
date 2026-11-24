@@ -80,3 +80,12 @@ Written for future agents and humans. Game © GingerEnslaver; technique credit: 
   batching, UI scaling/fonts, audio, input/physics feel, scene flow, platform/launch. Capture both at
   the same state and compare side-by-side; fix shim/shaders/asset-encoding (keep game code verbatim).
 - Codified as the skill `port-fidelity-gap-audit` (fabzter/agent-skills).
+
+## 11. Unity-free SDL3 rebuild (2026-11-24)
+- Removed Unity entirely: verbatim decompiled C# on a clean-room `UnityEngine` shim over **SDL3
+  `SDL_GPU` (native Metal)**. 855 MB → ~116–136 MB. Full gotchas in `notes/unity-free-gotchas.md`.
+- The size win is **asset re-encoding**, not the engine swap (assets were ~777 MB of the 855).
+- Backend choice matters: SDL3 compiles native MSL; FNA needs Windows fxc; MonoGame/raylib OpenGL-only
+  on Mac. SIGSEGV after load = Blit/teardown; lldb --batch hangs on CoreCLR → isolate without debugger.
+- Visual fidelity required full-res lightmaps + flat normals + palette point-filtering + default
+  post-fx + PBS specular (see §10 and `port-fidelity-gap-audit`).

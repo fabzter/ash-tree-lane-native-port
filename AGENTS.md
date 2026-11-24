@@ -35,6 +35,18 @@ See `README.md` (credit + intent) and `notes/lessons-learned.md` (durable findin
   (in `fabzter/agent-skills`); findings in `notes/lessons-learned.md`,
   `notes/cross-platform-build.md`.
 
+## Unity-free SDL3 rebuild (no Unity at all)
+
+- `build/unityfree/` runs the verbatim decompiled C# on a clean-room `UnityEngine` shim over
+  **SDL3 `SDL_GPU` (native Metal)** — ~116–136 MB vs 855 MB. `extractor/extract_assets.py` re-encodes
+  assets (the real size win); `src/UnityShim/`, `src/GameScripts/` (0 edits), `src/Shaders/*.metal`.
+- Run: `open "build/unityfree/dist/macos/The House On Ash Tree Lane.app"`; WASD/mouse, E interact,
+  F1–F6 post-fx. CLI: `--scene/--postfx/--frames/--screenshot/--send-key`.
+- **Fidelity**: "it runs ≠ it matches" — full-res lightmaps, `[[flat]]` normals, palette point-filter,
+  default post-fx, PBS specular. Audit via skill `port-fidelity-gap-audit`; see
+  `notes/unity-free-gotchas.md` + `build/UNITY_FREE_PLAN.md`.
+- Skills: `unity-free-sdl3-rebuild` + `port-fidelity-gap-audit` (fabzter/agent-skills).
+
 ## Architecture & Data Flow
 
 - The shipped build is a standard Unity Mono player: `UnityPlayer.dll` (native engine) +

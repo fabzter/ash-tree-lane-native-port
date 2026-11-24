@@ -34,6 +34,9 @@ This project shows, step by step, how to:
 4. **Port the D3D11-only shaders to native Metal** so the Mac build actually renders instead of
    falling back to a Null graphics device and crashing (`build/metal_port/`). This is the hard part,
    and it works: the title screen and scene render on an Apple M2 Pro.
+5. **Remove Unity entirely** (`build/unityfree/`): run the verbatim decompiled C# on a clean-room
+   `UnityEngine` shim over **SDL3 `SDL_GPU` (native Metal)** — ~116–136 MB vs 855 MB, and match the
+   original's looks (full-res lightmaps, flat normals, default post-fx). See `notes/unity-free-gotchas.md`.
 
 ## Results
 
@@ -42,12 +45,14 @@ This project shows, step by step, how to:
 | Windows | renders (D3D11), verified via CrossOver on Apple Silicon |
 | macOS | **native arm64 Metal render** — no Wine/Rosetta at runtime, no editor |
 | Linux | player assembled; engine + logic verified (real x86_64 hardware needed for full run) |
+| macOS (Unity-free) | **SDL3/Metal, no Unity** — ~116–136 MB; plays + post-fx; matches original look |
 
 ## Layout
 
 - `decomp/` — decompiled sources + the lib-only recomp build (`build.sh`) and parity gates.
-- `build/` — cross-platform assembly (`assemble.py`, `build.sh`, `fetch_players.sh`),
-  the Metal shader port (`metal_port/`), and the adaptation plan (`PORT_PLAN.md`).
+- `build/` — cross-platform assembly (`assemble.py`, `build.sh`, `fetch_players.sh`), the Metal shader
+  port (`metal_port/`), the **Unity-free SDL3 rebuild** (`unityfree/`), and plans (`PORT_PLAN.md`,
+  `UNITY_FREE_PLAN.md`).
 - `notes/` — research logs: recomp, cross-platform build, shader-port TODO→done, lessons learned.
 - `AGENTS.md` — guidance for AI agents working in this workspace.
 
@@ -64,6 +69,17 @@ The durable, generalizable lessons live as agent skills in
 [`fabzter/agent-skills`](https://github.com/fabzter/agent-skills):
 - `unity-mono-lib-only-recomp` — decompile/recompile + cross-platform player assembly + Mac launch fix.
 - `unity-no-editor-metal-shader-port` — the D3D11→Metal no-editor shader port.
+- `unity-free-sdl3-rebuild` — remove Unity; verbatim C# on SDL3/Metal shim; asset re-encoding; fidelity.
+- `port-fidelity-gap-audit` — "it runs ≠ it matches": systematic visual/audio/behavioral gap checklist.
+
+## Run the Unity-free build
+
+```bash
+open "build/unityfree/dist/macos/The House On Ash Tree Lane.app"
+```
+WASD/mouse, **E** interact; **F1–F6** post-fx (none/bloom/kuwahara/pixelart/dog/vignette). CLI stills:
+`--scene 0/1/2 --postfx X --frames N --screenshot out.png`. Compare vs original:
+`build/unityfree/verify/side_by_side_v3.png`.
 
 ## License & intent
 
