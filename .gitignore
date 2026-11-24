@@ -1,0 +1,27 @@
+# --- Copyrighted game payload: NOT redistributed (game (c) GingerEnslaver) ---
+original/
+extracted/
+decomp/csharp/
+decomp/rebuilt/
+decomp/rebuilt-check/
+decomp/rebuilt-ref/
+decomp/Assembly-CSharp.original.dll
+build/dist/
+build/shaders/
+notes/game_rebuilt.png
+
+# --- Licensed / large third-party artifacts ---
+build/players/
+build/tools/
+tools/
+.wineprefix/
+
+# --- Local / acquisition artifacts ---
+.omp/
+.DS_Store
+notes/cookies.txt
+notes/*.html
+notes/probe*.js
+notes/wine_game*.log
+__pycache__/
+*.pyc
