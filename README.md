@@ -37,6 +37,9 @@ This project shows, step by step, how to:
 5. **Remove Unity entirely** (`build/unityfree/`): run the verbatim decompiled C# on a clean-room
    `UnityEngine` shim over **SDL3 `SDL_GPU` (native Metal)** — ~116–136 MB vs 855 MB, and match the
    original's looks (full-res lightmaps, flat normals, default post-fx). See `notes/unity-free-gotchas.md`.
+6. **QoL** (`notes/qol-controller.md`): SDL3 controller support (left stick move / right stick look,
+   hotplug, raw-joystick fallback), resolution config (CLI + persisted settings + live swapchain
+   recreate), and a pause/settings menu (Esc/Start).
 
 ## Results
 

@@ -45,6 +45,9 @@ See `README.md` (credit + intent) and `notes/lessons-learned.md` (durable findin
 - **Fidelity**: "it runs ≠ it matches" — full-res lightmaps, `[[flat]]` normals, palette point-filter,
   default post-fx, PBS specular. Audit via skill `port-fidelity-gap-audit`; see
   `notes/unity-free-gotchas.md` + `build/UNITY_FREE_PLAN.md`.
+- **QoL**: SDL3 controller (left stick move/right stick look, HIDAPI PS4 on/Switch off, poll axes not
+  events, raw-joystick fallback), resolution config (CLI + persisted + live swapchain), pause menu
+  (Esc/Start). See `notes/qol-controller.md`; verify with `--test-gamepad`.
 - Skills: `unity-free-sdl3-rebuild` + `port-fidelity-gap-audit` (fabzter/agent-skills).
 
 ## Architecture & Data Flow
